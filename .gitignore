@@ -3,10 +3,10 @@ outputs/
 wandb/
 results/
 
-# dataset & weights (must be provided manually on each system)
-dataset/
-ckpts/
-weight/
+# # dataset & weights (must be provided manually on each system)
+# dataset/
+# ckpts/
+# weight/
 
 # python
 __pycache__/
