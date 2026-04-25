@@ -1,0 +1,169 @@
+# CNN decoder v2 — 1280px training, rotated CutMix, smaller head, dropout, heavier weight decay
+#
+# Key changes vs v1:
+#   - Input resolution 1280×1280 → GCPs appear at ~25px (vs 12px at 640px)
+#   - GCPCNNDecoder: hidden_dim 256→128, stem 3→2 convs (~380K params vs 2.95M)
+#   - Dropout p=0.1 in decoder
+#   - weight_decay 1e-4 → 5e-4 on decoder
+#   - CutMix rotation ±45°
+#   - batch=1, grad_accum=2 (effective batch=2, same as v1)
+#   - no_aug_epoch: 60→20 (shorter constant tail, longer cosine)
+#
+# Usage:
+#   python tools/train_finetune.py \
+#       -c configs/deimv2/finetune_gcp_cnn_v2.yml \
+#       --pretrained ~/Downloads/deimv2_dinov3_x_coco.pth \
+#       --use-amp --seed 42 --grad-accum 2 \
+#       --wandb-project gcp-detection --wandb-run-name cnn-v2
+
+__include__: [
+  '../dataset/gcp_detection.yml',
+  '../runtime.yml',
+  '../base/dataloader.yml',
+  '../base/optimizer.yml',
+]
+
+task: detection
+model: DEIM
+criterion: DEIMCriterion
+postprocessor: PostProcessor
+
+use_focal_loss: True
+eval_spatial_size: ~    # null = recompute pos embeddings dynamically for any input size
+checkpoint_freq: 5
+
+output_dir: ./outputs/gcp_cnn_v2
+
+# ── Model ─────────────────────────────────────────────────────────────
+DEIM:
+  backbone: DINOv3STAs
+  encoder: HybridEncoder
+  decoder: GCPCNNDecoder
+
+DINOv3STAs:
+  name: dinov3_vits16plus
+  weights_path: ./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+  interaction_indexes: [5, 8, 11]
+  finetune: False
+  conv_inplane: 64
+  hidden_dim: 256
+
+HybridEncoder:
+  in_channels: [256, 256, 256]
+  hidden_dim: 256
+  dim_feedforward: 1024
+  expansion: 1.25
+  depth_mult: 1.37
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dropout: 0.
+  enc_act: 'gelu'
+  act: 'silu'
+  version: deim
+  csp_type: csp2
+  fuse_op: sum
+
+GCPCNNDecoder:
+  in_channels: 256
+  hidden_dim: 128        # halved from v1 (256→128)
+  num_classes: 3
+  num_stem_convs: 2      # reduced from 3
+  dropout: 0.1           # regularization
+  p3_index: 0
+
+PostProcessor:
+  num_top_queries: 10
+
+# ── Loss ──────────────────────────────────────────────────────────────
+DEIMCriterion:
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2}
+  losses: ['vfl', 'boxes']
+  gamma: 1.5
+  alpha: 0.75
+  reg_max: 32
+  use_uni_set: False
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    alpha: 0.25
+    gamma: 2.0
+
+# ── Training schedule ─────────────────────────────────────────────────
+epoches: 100
+
+lrsheduler: FlatCosine
+flat_epoch: 5
+no_aug_epoch: 20         # shorter constant tail → cosine decays longer
+lr_gamma: 0.01
+warmup_iter: 500
+
+# ── Optimizer ─────────────────────────────────────────────────────────
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*(?:backbone|dinov3|sta)).*$'
+      lr: 0.0
+      weight_decay: 0.0
+    -
+      params: '^(?=.*encoder).*$'
+      lr: 0.0001           # lower lr for encoder (pretrained)
+      weight_decay: 0.0001
+    -
+      params: '^(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.0
+  lr: 0.0002
+  betas: [0.9, 0.999]
+  weight_decay: 0.0005   # 5x heavier than v1
+
+use_amp: True
+sync_bn: False
+use_ema: False
+clip_max_norm: 0.1
+
+# ── Data ──────────────────────────────────────────────────────────────
+train_dataloader:
+  total_batch_size: 1    # 1280px needs more VRAM; use --grad-accum 2 for effective batch=2
+  dataset:
+    transforms:
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.8}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [2048, 2048]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: [0, 80, 100]
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+
+  collate_fn:
+    type: BatchImageCollateFunction
+    base_size: 2048
+    base_size_repeat: ~
+    stop_epoch: 200
+    ema_restart_decay: 0.9999
+    mixup_prob: 0.0
+    mixup_epochs: [0, 0]
+    copyblend_prob: 0.0
+    copyblend_epochs: [0, 0]
+    cutmix_prob: 0.5
+    cutmix_epochs: [0, 100]
+    cutmix_context_pad: 2.0
+    cutmix_max_attempts: 30
+    cutmix_rotation_max: 45   # rotate pasted patches ±45°
+
+val_dataloader:
+  total_batch_size: 2
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [2048, 2048]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}

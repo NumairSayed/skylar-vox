@@ -1,0 +1,36 @@
+# ── SETUP (run once on each new system) ──────────────────────────────────────
+
+# 1. Create conda env
+# conda env create -f environment.yml && conda activate deimv2
+
+# 2. Prepare dataset (generates dataset/ symlinks + configs/dataset/gcp_detection.yml)
+# Dataset must be at: ~/Desktop/IISc/misc/skylark_assn/GCP_Assignment_Datasets/
+python tools/prepare_dataset.py \
+    --source-dir ~/Desktop/IISc/misc/skylark_assn/GCP_Assignment_Datasets/train_dataset \
+    --annotation-file ~/Desktop/IISc/misc/skylark_assn/GCP_Assignment_Datasets/train_dataset/gcp_marks.json \
+    --format gcp_json --bbox-size 80 --train-ratio 0.8 --seed 42 \
+    --dataset-name gcp_detection
+
+# 3. Download pretrained checkpoint
+# Place deimv2_dinov3_x_coco.pth in ~/Downloads/
+# Place dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth in ckpts/
+
+# ── TRAINING ──────────────────────────────────────────────────────────────────
+
+# Smoke test (1 epoch, batch=1)
+CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python tools/train_finetune.py -c configs/deimv2/finetune_gcp.yml --pretrained ~/Downloads/deimv2_dinov3_x_coco.pth --use-amp --seed 42 -u train_dataloader.total_batch_size=1 epoches=1
+
+# Full training (100 epochs, batch=2)
+CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python tools/train_finetune.py -c configs/deimv2/finetune_gcp.yml --pretrained ~/Downloads/deimv2_dinov3_x_coco.pth --use-amp --seed 42
+
+# Full training with WandB
+WANDB_API_KEY=$WANDB_API_KEY CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python tools/train_finetune.py -c configs/deimv2/finetune_gcp.yml --pretrained ~/Downloads/deimv2_dinov3_x_coco.pth --use-amp --seed 42 --wandb-project gcp-detection
+
+# CNN decoder — full training with WandB
+WANDB_API_KEY=$WANDB_API_KEY CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python tools/train_finetune.py -c configs/deimv2/finetune_gcp_cnn.yml --pretrained ~/Downloads/deimv2_dinov3_x_coco.pth --use-amp --seed 42 --wandb-project gcp-detection --wandb-run-name cnn-decoder
+
+# CNN decoder v2 — 2048px (max on 6GB GPU), smaller head, dropout, rotated CutMix
+WANDB_API_KEY=$WANDB_API_KEY CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python tools/train_finetune.py -c configs/deimv2/finetune_gcp_cnn_v2.yml --pretrained ~/Downloads/deimv2_dinov3_x_coco.pth --use-amp --seed 42 --grad-accum 2 --wandb-project gcp-detection --wandb-run-name cnn-v2
+
+# CNN decoder — infer on test set
+python tools/infer_test.py -c configs/deimv2/finetune_gcp_cnn.yml -r outputs/gcp_cnn/best_stg1.pth -i ~/Desktop/IISc/misc/skylark_assn/GCP_Assignment_Datasets/test_dataset/ --run-name cnn_test --thresh 0.45 --device cuda

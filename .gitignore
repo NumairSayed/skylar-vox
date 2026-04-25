@@ -1,0 +1,23 @@
+# outputs & checkpoints
+outputs/
+wandb/
+results/
+
+# dataset & weights (must be provided manually on each system)
+dataset/
+ckpts/
+weight/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# env
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
